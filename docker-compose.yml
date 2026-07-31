@@ -1,0 +1,13 @@
+# SendingTimeBot 最小化部署：一条命令启动，一条命令停止
+services:
+  bot:
+    build: .
+    container_name: sendingtimebot
+    # 崩溃或宿主机重启后自动拉起
+    restart: unless-stopped
+    # 所有配置（BOT_TOKEN 等）从 .env 注入容器
+    env_file:
+      - .env
+    # 队列状态持久化：随时 down/up，已排队的消息不丢失
+    volumes:
+      - ./data:/app/data
