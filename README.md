@@ -280,8 +280,10 @@ python test_bot.py
 - **需要代理**：设置系统环境变量 `HTTP_PROXY` / `HTTPS_PROXY`（urllib 原生支持），重启即可。
 - **投递保证**：消息先持久化再确认，重启不会丢失；极端崩溃窗口下可能重复投递（至少一次语义）。
 
+## 🤖 AIGC 声明
+
+本仓库代码使用 opencode 与 DeepSeek V4 Flash 生成。
+
 ## 📄 许可证
 
 [MIT License](LICENSE)
-
-代码托管于 [github.com/LenKiMo/SendingTimerBot](https://github.com/LenKiMo/SendingTimerBot)。
