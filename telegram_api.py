@@ -116,9 +116,37 @@ class TelegramClient:
         result = self.call("getUpdates", params)
         return result or []
 
-    def send_message(self, chat_id, text):
-        """向频道/会话发送文本消息。"""
-        return self.call("sendMessage", {"chat_id": chat_id, "text": text})
+    def send_message(self, chat_id, text, schedule_date=None):
+        """向频道/会话发送文本消息。
+
+        schedule_date：可选 Unix 秒（整数），由 Telegram 服务器定时发送
+        （客户端可见、可管理；bot 无法取消已排定的定时消息）。
+        """
+        params = {"chat_id": chat_id, "text": text}
+        if schedule_date is not None:
+            params["schedule_date"] = int(schedule_date)
+        return self.call("sendMessage", params)
+
+    def send_photo(self, chat_id, photo, caption=None):
+        return self.call("sendPhoto", {"chat_id": chat_id, "photo": photo, "caption": caption or ""})
+
+    def send_video(self, chat_id, video, caption=None):
+        return self.call("sendVideo", {"chat_id": chat_id, "video": video, "caption": caption or ""})
+
+    def send_animation(self, chat_id, animation, caption=None):
+        return self.call("sendAnimation", {"chat_id": chat_id, "animation": animation, "caption": caption or ""})
+
+    def send_audio(self, chat_id, audio, caption=None):
+        return self.call("sendAudio", {"chat_id": chat_id, "audio": audio, "caption": caption or ""})
+
+    def send_voice(self, chat_id, voice, caption=None):
+        return self.call("sendVoice", {"chat_id": chat_id, "voice": voice, "caption": caption or ""})
+
+    def send_sticker(self, chat_id, sticker):
+        return self.call("sendSticker", {"chat_id": chat_id, "sticker": sticker})
+
+    def send_document(self, chat_id, document, caption=None):
+        return self.call("sendDocument", {"chat_id": chat_id, "document": document, "caption": caption or ""})
 
     def get_file(self, file_id):
         """获取文件信息（含 file_path，用于下载）。"""

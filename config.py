@@ -118,8 +118,8 @@ class Config:
         # 单个文件最多解析行数
         self.max_file_lines = _int(env, "MAX_FILE_LINES", 5000)
 
-        # 状态文件路径（Docker 下建议放在挂载卷中）
-        self.state_path = _pick(env, "STATE_PATH", "data/state.json")
+        # 状态数据目录（每用户一个队列状态文件：data/state_<user_id>.json）
+        self.data_dir = _pick(env, "DATA_DIR", "data")
 
         # API 请求失败重试次数
         self.max_retries = _int(env, "MAX_RETRIES", 3)
@@ -132,3 +132,16 @@ class Config:
 
         # 防滥用：循环发送单次展开的消息总数上限
         self.max_loop_items = _int(env, "MAX_LOOP_ITEMS", 5000)
+
+        # 防滥用：每名用户最大并行队列数（每个目标一条队列）
+        self.max_queues_per_user = _int(env, "MAX_QUEUES_PER_USER", 10)
+
+        # 自动清理：队列「停止接收且无待发」持续超过该秒数即移除记录；
+        # 用户所有队列被清理后删除其状态文件（默认 24 小时）
+        self.gc_idle_seconds = _int(env, "GC_IDLE_SECONDS", 86400)
+
+        # /list 每页显示条数
+        self.list_page_size = _int(env, "LIST_PAGE_SIZE", 20)
+
+        # /setloop 内容收集：无新内容超过该秒数自动开始循环（默认 2 分钟）
+        self.loop_collect_timeout = _float(env, "LOOP_COLLECT_TIMEOUT", 120)

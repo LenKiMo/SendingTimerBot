@@ -1,10 +1,15 @@
-# SendingTimeBot 最小化部署：一条命令启动，一条命令停止
+# SendingTimeBot 部署：直接从 GitHub 源码构建镜像（无需本地克隆代码）
 services:
   bot:
-    build: .
+    # 从已发布的仓库构建；#main 可改为固定版本标签（如 #v1.0.0）保证可复现；
+    # 如需使用本地源码构建，把此行改为 build: .
+    build: https://github.com/LenKiMo/SendingTimerBot.git#main
     container_name: sendingtimebot
     # 崩溃或宿主机重启后自动拉起
     restart: unless-stopped
+    # 优雅停止宽限期：覆盖 30 秒长轮询窗口，让 docker compose down 时
+    # 进程能处理 SIGTERM 正常退出（否则超时被 SIGKILL，退出码 137）
+    stop_grace_period: 70s
     # 所有配置（BOT_TOKEN 等）从 .env 注入容器
     env_file:
       - .env

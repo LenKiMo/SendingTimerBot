@@ -1,0 +1,10 @@
+.env
+data/
+__pycache__/
+*.pyc
+.git
+.gitignore
+README.md
+test_bot.py
+docker-compose.yml
+Dockerfile
