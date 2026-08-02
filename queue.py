@@ -14,7 +14,7 @@
 调度语义（与需求一致，逐队列生效）：
 - 队列无定时消息时：锚点 = 收到时刻，首条 = 收到时刻 + 间隔
 - 队列已有定时消息时：锚点 = 最后一条定时消息的定时时刻，逐条累加
-- 队列发空后：锚点 = 最后一条已发送的定时时刻，保持节奏
+- 队列发空后收到新消息：以收到时刻为基准重新起算（避免旧锚点过期导致瞬间突发发送）
 """
 
 import json
@@ -359,12 +359,16 @@ class QueueStore:
         return added, first_send_at, full, current_target
 
     def _next_anchor_locked(self, record):
-        """确定队列下一条消息的基准时刻。"""
+        """确定队列下一条消息的基准时刻。
+
+        语义（与需求逐条对应）：
+        - 队列有待发消息 → 以最后一条定时消息的定时时刻为锚，逐条累加间隔
+        - 队列无待发消息 → 以收到时刻为锚（重新起算），避免旧锚点过期
+          导致消息被瞬间突发发送（如 bot 停摆数小时后收到新消息）
+        """
         if record["pending"]:
-            return record["pending"][-1]["send_at"]  # 已有定时消息 → 以最后一条为锚
-        if record["last_send_at"] is not None:
-            return record["last_send_at"]  # 队列已空但发送过 → 保持节奏
-        return self._now()  # 队列无定时消息 → 以收到时刻为锚
+            return record["pending"][-1]["send_at"]  # 有定时消息 → 以最后一条为锚
+        return self._now()  # 无定时消息 → 以收到时刻为锚
 
     def replace_pending(self, user_id, texts, interval_s, loop_info=None):
         """/setloop：清空当前队列并整体排入循环序列（纯文本，锚点沿用最后一条定时时刻）。"""

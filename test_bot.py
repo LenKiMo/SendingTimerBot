@@ -80,15 +80,16 @@ class StoreTests(unittest.TestCase):
         self.store.confirm_sent(222, "@pics")
         self.assertEqual(self.store.peek_next_due(now=2000)["payload"], "c")
 
-    def test_new_messages_after_drain_keep_cadence(self):
-        # 需求：队列发空后新消息仍沿用最后一条定时时刻，保持节奏
+    def test_new_messages_after_drain_anchor_to_receipt_time(self):
+        # 需求：队列无定时消息（已发空）→ 新消息以收到时刻为基准重新起算，
+        # 避免旧锚点过期导致瞬间突发发送
         self.store.set_queue(222, "@pics", 300)
         self.store.add_messages(222, ["a"])
-        self.store.confirm_sent(222, "@pics")  # last_send_at = 1300
-        self.clock.advance(10000)  # 11000 时才收到新消息
+        self.store.confirm_sent(222, "@pics")  # 队列发空（last_send_at = 1300）
+        self.clock.advance(10000)  # 11000 时才收到新消息（模拟 bot 停摆）
         added, first_at, _, _ = self.store.add_messages(222, ["d"])
         self.assertEqual(added, 1)
-        self.assertEqual(first_at, 1600.0)  # 1300 + 300，而非 11000 + 300
+        self.assertEqual(first_at, 11300.0)  # 收到时刻 11000 + 300，而非沿用旧锚 1300+300
 
     def test_parallel_queues_independent(self):
         # 多队列：/set 新目标不影响旧队列；切回后沿用原节奏
