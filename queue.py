@@ -101,7 +101,8 @@ class QueueStore:
         if not isinstance(data, dict):
             return record
         record["target"] = data.get("target")
-        record["display"] = data.get("display")
+        # 兼容旧版单队列格式的 target_display 字段（迁移时保留显示名）
+        record["display"] = data.get("display") or data.get("target_display")
         interval = data.get("interval_s")
         record["interval_s"] = float(interval) if isinstance(interval, (int, float)) and interval > 0 else None
         record["active"] = bool(data.get("active", False))
@@ -635,6 +636,20 @@ class QueueStore:
             return old_preview, self._item_preview(item)
 
     # ================================================================== 查询
+    def update_display(self, user_id, target, display):
+        """补全队列记录的显示名（历史/迁移记录缺失时由 bot 用 getChat 解析后调用）。"""
+        if not display:
+            return
+        with self._lock:
+            user = self._users.get(str(user_id))
+            record = user["queues"].get(target) if user else None
+            if not record:
+                return
+            record["display"] = display
+            if record.get("pending_approval"):
+                record["pending_approval"]["display"] = display
+            self._save_user(user_id, user)
+
     def user_active(self, user_id):
         """该用户当前队列是否处于接收状态。"""
         with self._lock:

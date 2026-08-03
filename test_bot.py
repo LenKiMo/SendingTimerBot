@@ -193,6 +193,29 @@ class StoreTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir.name, "state.json")))
         self.assertFalse(store.claim_legacy(222))  # 只能接管一次
 
+    def test_legacy_display_migration(self):
+        # 旧版单队列 state.json 的 target_display 字段 → 迁移后保留显示名
+        legacy = {
+            "target": "@pics",
+            "target_display": "图片频道（@pics）",
+            "interval_s": 300,
+            "active": True,
+            "pending": [{"text": "old", "send_at": 1300.0}],
+        }
+        with open(os.path.join(self.dir.name, "state.json"), "w", encoding="utf-8") as fh:
+            json.dump(legacy, fh)
+        store = QueueStore(self.dir.name, now_fn=self.clock)
+        self.assertTrue(store.claim_legacy(222))
+        self.assertEqual(store.snapshot_user(222)["queues"][0]["display"], "图片频道（@pics）")
+
+    def test_update_display_persists(self):
+        # 惰性补全：update_display 更新并持久化显示名
+        self.store.set_queue(222, "@pics", 300)
+        self.store.update_display(222, "@pics", "图片频道（@pics）")
+        self.assertEqual(self.store.snapshot_user(222)["queues"][0]["display"], "图片频道（@pics）")
+        s2 = QueueStore(self.dir.name, now_fn=self.clock)  # 重启后仍在
+        self.assertEqual(s2.snapshot_user(222)["queues"][0]["display"], "图片频道（@pics）")
+
     def test_offset_meta_persistence(self):
         self.store.set_offset(123)
         s2 = QueueStore(self.dir.name, now_fn=self.clock)
@@ -699,7 +722,7 @@ def _record_text(r):
 class BotHarness:
     """端到端测试脚手架：伪服务器 + 环境变量 + 真实 bot 主循环。"""
 
-    def __init__(self, updates, temp_dir, allow_private=False, extra_env=None, files=None, failing_sends=None, conflict=False):
+    def __init__(self, updates, temp_dir, allow_private=False, extra_env=None, files=None, failing_sends=None, conflict=False, data_dir=None):
         for key in _ENV_KEYS:
             os.environ.pop(key, None)
         os.environ["NO_PROXY"] = "127.0.0.1,localhost"
@@ -707,7 +730,7 @@ class BotHarness:
         os.environ["BOT_TOKEN"] = "TEST:TOKEN"
         os.environ["API_BASE_URL"] = "http://127.0.0.1:%d" % self.fake.port
         os.environ["CHECK_INTERVAL_S"] = "0.05"
-        os.environ["DATA_DIR"] = temp_dir
+        os.environ["DATA_DIR"] = data_dir or temp_dir
         os.environ["ALLOWED_USER_IDS"] = ""
         if allow_private:
             os.environ["ALLOW_PRIVATE_TARGETS"] = "true"
@@ -752,15 +775,41 @@ class BotHarness:
 
 
 class EndToEndTests(unittest.TestCase):
-    def _run(self, updates, allow_private=False, extra_env=None, files=None, failing_sends=None, conflict=False):
+    def _run(self, updates, allow_private=False, extra_env=None, files=None, failing_sends=None, conflict=False, data_dir=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         harness = BotHarness(updates, tmp.name, allow_private=allow_private, extra_env=extra_env,
-                             files=files, failing_sends=failing_sends, conflict=conflict)
+                             files=files, failing_sends=failing_sends, conflict=conflict, data_dir=data_dir)
         self.addCleanup(harness.stop)
         for key in _ENV_KEYS:
             self.addCleanup(os.environ.pop, key, None)
         return harness
+
+    def test_display_healing_for_legacy_records(self):
+        # 历史/迁移记录缺失显示名 → /status 时惰性 getChat 补全并持久化
+        record = {
+            "target": "@pics", "display": None, "interval_s": 300, "active": True,
+            "pending": [], "last_send_at": None, "pending_approval": None,
+            "loop_info": None, "idle_since": None,
+        }
+        user = {"current": "@pics", "queues": {"@pics": record}}
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        with open(os.path.join(data_dir.name, "state_222.json"), "w", encoding="utf-8") as fh:
+            json.dump(user, fh)
+        updates = [[make_update(1, 777, "private", 222, "/status")]]
+        harness = self._run(updates, data_dir=data_dir.name)
+        self.assertTrue(harness.wait_for(lambda s, r: any("图片频道（@pics）" in t for t in r)))
+        # 补全已持久化
+        self.assertEqual(harness.bot.store.snapshot_user(222)["queues"][0]["display"], "图片频道（@pics）")
+
+    def test_format_interval_large_seconds(self):
+        # 大秒数显示为「小时 分 秒」组合（13003 秒 → 3 小时 36 分 43 秒）
+        from bot import format_interval
+        self.assertEqual(format_interval(13003), "3 小时 36 分 43 秒")
+        self.assertEqual(format_interval(0), "0 秒")
+        self.assertEqual(format_interval(60), "1 分")
+        self.assertEqual(format_interval(3600), "1 小时")
 
     def test_full_flow_channel(self):
         # 回归：频道 /set → 排队 → 按间隔发送 → /cancel 停止接收

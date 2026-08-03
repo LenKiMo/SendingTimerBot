@@ -59,12 +59,18 @@ def format_time(ts):
 
 
 def format_interval(seconds):
-    seconds = int(seconds)
-    if seconds % 3600 == 0:
-        return "%d 小时" % (seconds // 3600)
-    if seconds % 60 == 0:
-        return "%d 分钟" % (seconds // 60)
-    return "%d 秒" % seconds
+    """把秒数格式化为可读的「小时/分钟/秒」组合（如 13003 秒 → 3 小时 36 分）。"""
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append("%d 小时" % hours)
+    if minutes:
+        parts.append("%d 分" % minutes)
+    if secs or not parts:
+        parts.append("%d 秒" % secs)
+    return " ".join(parts)
 
 
 def _parse_until_time(value):
@@ -652,12 +658,27 @@ class Bot:
             return None
         return next((q for q in snap["queues"] if q["target"] == snap["current"]), None)
 
+    def _ensure_queue_display(self, user_id, target):
+        """队列记录缺失显示名（旧版迁移/历史数据）时，用 getChat 解析并持久化补全。"""
+        snap = self.store.snapshot_user(user_id)
+        queue = next((q for q in snap["queues"] if q["target"] == target), None)
+        if queue is None or queue.get("display"):
+            return
+        try:
+            display = _chat_display(self.api.get_chat(target), target)
+        except ApiError:
+            return
+        self.store.update_display(user_id, target, display)
+        log.info("已补全队列 %s 的显示名：%s", target, display)
+
     def _cmd_list(self, user_id, chat_id, parts):
         """查看当前队列待发列表（全局编号分页，页码写在回复中，无需记忆）。"""
         queue = self._current_queue(user_id)
         if queue is None:
             self.api.send_message(chat_id, "📋 你还没有任何队列。使用 /set <目标> <间隔> 开始。")
             return
+        self._ensure_queue_display(user_id, queue["target"])
+        queue = self._current_queue(user_id)
         page_arg = parts[1].strip() if len(parts) > 1 else ""
         if page_arg.isdigit():
             page = int(page_arg)
@@ -861,6 +882,9 @@ class Bot:
             self.api.send_message(chat_id, "⚠️ 队列未激活或已满，循环未生效。")
             return
         snap = self.store.snapshot_user(user_id)
+        if snap["current"]:
+            self._ensure_queue_display(user_id, snap["current"])
+            snap = self.store.snapshot_user(user_id)
         current_snap = next((q for q in snap["queues"] if q["target"] == snap["current"]), None)
         reply = "🔁 循环已启动：%s（间隔 %s，%s）。" % (
             loop_desc,
@@ -984,6 +1008,11 @@ class Bot:
         if snap["count"] == 0:
             self.api.send_message(chat_id, "📋 你还没有任何队列。使用 /set <频道/群组/用户> <间隔> 开始。")
             return
+        # 历史/迁移记录缺失显示名 → 惰性补全后重新读取
+        for queue in snap["queues"]:
+            if not queue["display"]:
+                self._ensure_queue_display(user_id, queue["target"])
+        snap = self.store.snapshot_user(user_id)
         lines = ["📋 我的队列（共 %d 个）" % snap["count"]]
         for index, queue in enumerate(snap["queues"], start=1):
             name = queue["display"] or queue["target"]
@@ -1051,6 +1080,9 @@ class Bot:
             self.api.send_message(chat_id, "⚠️ 队列已满，本次未加入。")
             return
         snap = self.store.snapshot_user(user_id)
+        if snap["current"]:
+            self._ensure_queue_display(user_id, snap["current"])
+            snap = self.store.snapshot_user(user_id)
         current_snap = next((q for q in snap["queues"] if q["target"] == snap["current"]), None)
         if current_snap is None:
             return
