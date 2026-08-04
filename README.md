@@ -52,8 +52,8 @@ cd SendingTimerBot
 cp .env.example .env          # Windows: copy .env.example .env
 #    编辑 .env，填入 BOT_TOKEN=（找 @BotFather 用 /newbot 创建后获取）
 
-# 3. 启动（镜像从仓库源码构建，构建时自动拉取最新 main）
-docker compose up -d --build
+# 3. 启动（镜像从 ghcr.io 拉取，服务器无需编译）
+docker compose up -d
 
 # 4. 查看日志
 docker compose logs -f
@@ -210,7 +210,7 @@ bot 在群内发布通知：「请群管理员在群内发送 /approve 确认」
 
 ```bash
 # 上线
-docker compose up -d --build
+docker compose up -d
 
 # 查看实时日志
 docker compose logs -f
@@ -221,11 +221,19 @@ docker compose down
 # 随时重新上线（已排队消息继续按计划发送）
 docker compose up -d
 
-# 更新到最新版本
-docker compose up -d --build
+# 更新到最新 main 镜像（CI 已自动构建发布到 ghcr.io）
+docker compose pull
+docker compose up -d
 ```
 
-**更新机制**：`docker-compose.yml` 的 `build` 直接指向本仓库，`--build` 时会自动从 GitHub 拉取最新 `main` 构建——**无需手动 `git pull`**；本地 `git pull` 仅用于同步配置模板与文档。如需固定版本，把 `build` 行末尾的 `#main` 改为发布标签（如 `#v1.0.0`）。
+**发布与更新机制**：每次推送 `main` 或 `v*` 标签，GitHub Actions 自动构建镜像并发布到
+[ghcr.io/lenkimo/sendingtimerbot](https://github.com/LenKiMo/SendingTimerBot/pkgs/container/sendingtimerbot)——
+服务器仅需拉取（`docker compose pull`），**无需任何构建工具链**。仓库为公开，镜像公开，无需认证。
+
+- **固定版本部署**：把 `docker-compose.yml` 的 `image:` 标签改为版本标签，如
+  `ghcr.io/lenkimo/sendingtimerbot:v1.0.3`（发布流程：改代码 → `git tag -s v1.0.4 && git push origin v1.0.4`，CI 自动出镜像）
+- **回退**：改回上一个版本标签后 `docker compose pull && up -d` 即可，数据卷不受影响
+- **源码构建回退**：如不想走 ghcr，把 compose 中 `image:` 行注释、启用 `build:` 行（指向仓库），用 `docker compose up -d --build`
 
 **数据与持久化**
 
@@ -246,7 +254,8 @@ SendingTimeBot/
 ├── config.py           .env 配置加载（纯标准库）
 ├── test_bot.py         自动化验证（无需真实 token）
 ├── Dockerfile          零依赖镜像（无需 pip install）
-├── docker-compose.yml  一键部署编排
+├── docker-compose.yml  一键部署编排（从 ghcr.io 拉取镜像）
+├── .github/workflows/  GitHub Actions：自动构建并发布镜像到 ghcr.io
 ├── LICENSE             MIT 许可证
 ├── .env.example        配置模板
 └── data/               运行时状态（自动生成，勿手动编辑）

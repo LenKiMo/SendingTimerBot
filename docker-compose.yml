@@ -1,9 +1,10 @@
-# SendingTimeBot 部署：直接从 GitHub 源码构建镜像（无需本地克隆代码）
+# SendingTimeBot 部署：从 GitHub Container Registry (ghcr.io) 拉取镜像，服务器无需构建
 services:
   bot:
-    # 从已发布的仓库构建；#main 可改为固定版本标签（如 #v1.0.0）保证可复现；
-    # 如需使用本地源码构建，把此行改为 build: .
-    build: https://github.com/LenKiMo/SendingTimerBot.git#main
+    # 日常迭代跟随 main 镜像；固定版本改用版本标签（如 ghcr.io/lenkimo/sendingtimerbot:v1.0.3）
+    image: ghcr.io/lenkimo/sendingtimerbot:main
+    # 如需改回源码构建（不经 ghcr），注释上面一行并启用下面一行：
+    # build: https://github.com/LenKiMo/SendingTimerBot.git#main
     container_name: sendingtimebot
     # 崩溃或宿主机重启后自动拉起
     restart: unless-stopped
