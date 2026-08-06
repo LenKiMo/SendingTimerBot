@@ -1,15 +1,13 @@
-# SendingTimeBot 部署：从 GitHub Container Registry (ghcr.io) 拉取镜像，服务器无需构建
+# SendingTimeBot 部署：从 GitHub Container Registry（ghcr.io）拉取镜像，服务器无需构建
 services:
   bot:
-    # 日常迭代跟随 main 镜像；固定版本改用版本标签（如 ghcr.io/lenkimo/sendingtimerbot:v1.0.3）
-    image: ghcr.io/lenkimo/sendingtimerbot:main
-    # 如需改回源码构建（不经 ghcr），注释上面一行并启用下面一行：
-    # build: https://github.com/LenKiMo/SendingTimerBot.git#main
+    # 镜像由 CI 自动构建发布：推送 main → :main；推送 v* 版本标签 → :vX.Y.Z 与 :latest
+    # 日常部署跟随 :latest（最新发布版）；需要固定版本时把标签改为 :v1.0.4 之类的版本号
+    image: ghcr.io/lenkimo/sendingtimerbot:latest
     container_name: sendingtimebot
     # 崩溃或宿主机重启后自动拉起
     restart: unless-stopped
-    # 优雅停止宽限期：覆盖 30 秒长轮询窗口，让 docker compose down 时
-    # 进程能处理 SIGTERM 正常退出（否则超时被 SIGKILL，退出码 137）
+    # 优雅停止宽限期：等待长轮询中的请求返回后再退出，避免进程被强制终止
     stop_grace_period: 70s
     # 所有配置（BOT_TOKEN 等）从 .env 注入容器
     env_file:

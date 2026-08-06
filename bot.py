@@ -11,7 +11,7 @@
    时间展开为定时序列发往当前队列的目标
 4. /reset 清空指定队列重来；/cancel 停止当前队列接收；已排队消息继续按时发送
 5. 每用户队列状态持久化到 data/state_<user_id>.json，轮询 offset 存 meta.json，
-   重启不丢不重；旧版单队列状态自动迁移
+   重启不丢不重
 """
 
 import argparse
@@ -659,7 +659,7 @@ class Bot:
         return next((q for q in snap["queues"] if q["target"] == snap["current"]), None)
 
     def _ensure_queue_display(self, user_id, target):
-        """队列记录缺失显示名（旧版迁移/历史数据）时，用 getChat 解析并持久化补全。"""
+        """队列记录缺失显示名时，用 getChat 解析并持久化补全。"""
         snap = self.store.snapshot_user(user_id)
         queue = next((q for q in snap["queues"] if q["target"] == target), None)
         if queue is None or queue.get("display"):
@@ -1008,7 +1008,7 @@ class Bot:
         if snap["count"] == 0:
             self.api.send_message(chat_id, "📋 你还没有任何队列。使用 /set <频道/群组/用户> <间隔> 开始。")
             return
-        # 历史/迁移记录缺失显示名 → 惰性补全后重新读取
+        # 队列缺显示名 → 惰性补全后重新读取
         for queue in snap["queues"]:
             if not queue["display"]:
                 self._ensure_queue_display(user_id, queue["target"])

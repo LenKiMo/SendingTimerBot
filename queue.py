@@ -9,7 +9,7 @@
 - /cancel 停止当前队列接收；/reset 清空某队列重来
 - 群组审批（pending_approval）、循环发送（loop_info）均为队列级状态
 - 长轮询 offset 存于 data/meta.json（bot 全局）
-- 旧版单队列 state.json 自动迁移为「遗留队列」，由首位交互的管理员接管
+- 历史单队列状态（state.json）自动迁移为「遗留队列」，由首位交互的管理员接管
 
 调度语义（与需求一致，逐队列生效）：
 - 队列无定时消息时：锚点 = 收到时刻，首条 = 收到时刻 + 间隔
@@ -101,7 +101,7 @@ class QueueStore:
         if not isinstance(data, dict):
             return record
         record["target"] = data.get("target")
-        # 兼容旧版单队列格式的 target_display 字段（迁移时保留显示名）
+        # 兼容早期字段名 target_display（两种历史格式均可读取）
         record["display"] = data.get("display") or data.get("target_display")
         interval = data.get("interval_s")
         record["interval_s"] = float(interval) if isinstance(interval, (int, float)) and interval > 0 else None
@@ -637,7 +637,7 @@ class QueueStore:
 
     # ================================================================== 查询
     def update_display(self, user_id, target, display):
-        """补全队列记录的显示名（历史/迁移记录缺失时由 bot 用 getChat 解析后调用）。"""
+        """补全队列记录的显示名（由 bot 在记录缺失显示名时调用）。"""
         if not display:
             return
         with self._lock:

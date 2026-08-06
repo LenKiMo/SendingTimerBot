@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .git
 .gitignore
+.github/
 README.md
 test_bot.py
 docker-compose.yml

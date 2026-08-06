@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-compose%20ready-2496ED.svg?logo=docker&logoColor=white)](docker-compose.yml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-lenkimo%2Fsendingtimerbot-2496ED.svg?logo=docker&logoColor=white)](https://github.com/LenKiMo/SendingTimerBot/pkgs/container/sendingtimerbot)
 [![GitHub](https://img.shields.io/badge/repo-LenKiMo%2FSendingTimerBot-181717.svg?logo=github&logoColor=white)](https://github.com/LenKiMo/SendingTimerBot)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/LenKiMo/SendingTimerBot)
 
@@ -226,21 +227,22 @@ docker compose pull
 docker compose up -d
 ```
 
-**发布与更新机制**：每次推送 `main` 或 `v*` 标签，GitHub Actions 自动构建镜像并发布到
+**发布与更新机制**：每次推送 `main` 或 `v*` 标签，GitHub Actions 自动构建多架构镜像
+（linux/amd64、linux/arm64、linux/arm/v7，x86 服务器、ARM 云主机、树莓派均可直接拉取）并发布到
 [ghcr.io/lenkimo/sendingtimerbot](https://github.com/LenKiMo/SendingTimerBot/pkgs/container/sendingtimerbot)——
 服务器仅需拉取（`docker compose pull`），**无需任何构建工具链**。仓库为公开，镜像公开，无需认证。
 
 - **固定版本部署**：把 `docker-compose.yml` 的 `image:` 标签改为版本标签，如
   `ghcr.io/lenkimo/sendingtimerbot:v1.0.3`（发布流程：改代码 → `git tag -s v1.0.4 && git push origin v1.0.4`，CI 自动出镜像）
 - **回退**：改回上一个版本标签后 `docker compose pull && up -d` 即可，数据卷不受影响
-- **源码构建回退**：如不想走 ghcr，把 compose 中 `image:` 行注释、启用 `build:` 行（指向仓库），用 `docker compose up -d --build`
+- **自行构建**：仓库包含 Dockerfile（零依赖）。不想使用预构建镜像时可自行构建运行：
+  `docker build -t sendingtimerbot . && docker run -d --env-file .env -v ./data:/app/data sendingtimerbot`
 
 **数据与持久化**
 
 - 每名用户的队列状态实时写入 `./data/state_<user_id>.json`（原子替换写入，防损坏）；轮询进度存于 `./data/meta.json`
 - 容器销毁、重建、升级均不丢数据；如需彻底清空，删除 `./data` 目录后重启即可
 - **自动清理**：队列「停止接收且无待发」持续超过 `GC_IDLE_SECONDS`（默认 24 小时）自动移除记录；用户无任何队列时删除其状态文件（启动时与每小时各扫描一次），减少用户使用痕迹在服务端的保留
-- **旧版升级**：单队列版（`state.json`）自动迁移为「遗留队列」，继续按时发送，由首位交互的管理员接管，无需手动处理
 
 **本地部署**（非容器）见[快速开始](#-快速开始)方式二，配置项完全相同。
 
@@ -255,7 +257,7 @@ SendingTimeBot/
 ├── test_bot.py         自动化验证（无需真实 token）
 ├── Dockerfile          零依赖镜像（无需 pip install）
 ├── docker-compose.yml  一键部署编排（从 ghcr.io 拉取镜像）
-├── .github/workflows/  GitHub Actions：自动构建并发布镜像到 ghcr.io
+├── .github/workflows/  GitHub Actions：自动构建多架构镜像并发布到 ghcr.io
 ├── LICENSE             MIT 许可证
 ├── .env.example        配置模板
 └── data/               运行时状态（自动生成，勿手动编辑）

@@ -1,5 +1,5 @@
 # 构建并发布 Docker 镜像到 GitHub Container Registry (ghcr.io)
-# 触发：main 分支推送（:main 镜像）、v* 版本标签（:v1.0.3 / :1.0.3 / :1.0 / :latest）、手动触发
+# 触发：main 分支推送（:main 镜像）、v* 版本标签（:vX.Y.Z / :X.Y.Z / :X.Y / :latest）、手动触发
 name: publish-docker
 
 on:
@@ -12,6 +12,11 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }} # lenkimo/sendingtimerbot
 
+# 同一分支/标签连续推送时取消旧构建，避免并发推同一个镜像
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -21,6 +26,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # 交叉编译 arm64 / armv7 需要 QEMU 模拟
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -50,6 +59,8 @@ jobs:
         with:
           context: .
           push: true
+          # x86 服务器、ARM 云主机、树莓派均可直接拉取
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
