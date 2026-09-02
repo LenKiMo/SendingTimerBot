@@ -39,6 +39,25 @@ START_TEXT = (
     "发送 /help 查看完整功能菜单。"
 )
 
+# 命令菜单（setMyCommands）：对话框 / 按钮与输入 / 时的命令联想。
+# description ≤ 256 字符；与 _help_text 的文案保持一致。
+BOT_COMMANDS = [
+    {"command": "start", "description": "👋 欢迎与快速开始"},
+    {"command": "set", "description": "设置目标与间隔：/set <目标> <间隔>"},
+    {"command": "setloop", "description": "配置循环发送：/setloop <间隔> <限制>"},
+    {"command": "pace", "description": "重排已排队消息的间隔：/pace <间隔> [X[-Y]]"},
+    {"command": "later", "description": "单条定时消息：/later <时间> <内容>"},
+    {"command": "list", "description": "查看当前队列待发列表（分页）"},
+    {"command": "drop", "description": "删除某条：/drop <序号>"},
+    {"command": "move", "description": "调整顺序：/move <序号> <位置>"},
+    {"command": "edit", "description": "修改某条文本内容：/edit <序号> <新内容>"},
+    {"command": "reset", "description": "清空队列待发并重新起锚：[目标]"},
+    {"command": "cancel", "description": "停止当前队列接收新消息"},
+    {"command": "status", "description": "查看我的全部队列与状态"},
+    {"command": "approve", "description": "群管理员批准定时发送请求"},
+    {"command": "help", "description": "📖 完整功能菜单"},
+]
+
 
 def parse_interval(raw):
     """解析间隔："5" = 5 分钟；支持后缀 s/m/h/d，如 30s、2h。返回秒数（最小 1 秒）。"""
@@ -236,6 +255,9 @@ class Bot:
             "/drop <序号> — 删除某条\n"
             "/move <序号> <位置> — 调整顺序（1 = 置顶，最大序号 = 置底）\n"
             "/edit <序号> <新内容> — 修改文本条目内容（媒体条目不支持编辑）\n"
+            "/pace <间隔> [X[-Y]] — 重排已排队消息的发送间隔：/pace 30 整批改为 30 分钟；\n"
+            "   /pace 5 60-90 把第 60-90 条间隔改为 5 分钟（X 单独写 = 第 X 条到队尾；\n"
+            "   序号与 /list 一致；区间外消息保持原时刻；覆盖整批时同步队列基准间隔）\n"
             "/reset [目标] — 清空队列待发并重新起锚（默认当前队列；不影响其它队列）\n"
             "/cancel — 停止当前队列接收新消息（已排队消息继续按时发送）\n"
             "/start — 欢迎与快速开始\n"
@@ -253,6 +275,12 @@ class Bot:
     def run(self):
         me = self.api.get_me()
         log.info("已连接 Telegram: @%s (%s)", me.get("username"), me.get("first_name"))
+        # 注册命令菜单（/ 按钮与输入联想）；失败不阻塞运行（可稍后由 /start 或重启补注册）
+        try:
+            self.api.set_my_commands(BOT_COMMANDS)
+            log.info("已注册命令菜单（%d 个命令）", len(BOT_COMMANDS))
+        except Exception as exc:
+            log.warning("命令菜单注册失败（不影响运行）：%s", exc)
         threading.Thread(target=self._scheduler_loop, name="scheduler", daemon=True).start()
         offset = self.store.get_offset()
         log.info("开始长轮询（offset=%s）", offset)
@@ -458,6 +486,8 @@ class Bot:
             self._cmd_move(user_id, chat_id, parts)
         elif cmd == "/edit":
             self._cmd_edit(user_id, chat_id, parts)
+        elif cmd == "/pace":
+            self._cmd_pace(user_id, chat_id, parts)
         elif cmd == "/reset":
             self._cmd_reset(user_id, chat_id, parts)
         elif cmd == "/approve":
@@ -698,7 +728,7 @@ class Bot:
         lines.append("")
         next_page = result["page"] + 1 if result["page"] < result["pages"] else 1
         lines.append("输入 /list %d 查看下一页，或 /list 页码 直达（列表随发送实时更新，以本页为准）" % next_page)
-        lines.append("操作：/drop 序号｜/move 序号 位置｜/edit 序号 新内容")
+        lines.append("操作：/drop 序号｜/move 序号 位置｜/edit 序号 新内容｜/pace 间隔 [X[-Y]]")
         self.api.send_message(chat_id, "\n".join(lines))
 
     def _cmd_drop(self, user_id, chat_id, parts):
@@ -967,7 +997,85 @@ class Bot:
             % (display, format_time(ts)),
         )
 
-    # ------------------------------------------------------------------ /reset / /cancel / /status
+    # ------------------------------------------------------------------ /pace / /reset / /cancel / /status
+    def _cmd_pace(self, user_id, chat_id, parts):
+        """重排当前队列已排定消息的发送间隔。
+
+        /pace <间隔>             → 整批重排（首条保持原定时时刻，其余按新间隔顺延）
+        /pace <间隔> X-Y         → 仅重排第 X 到第 Y 条（1-based，与 /list 序号一致）
+        /pace <间隔> X           → 重排第 X 条到队尾
+
+        语义：区间首条若为队首（X=1）则保持原时刻，否则以前一条原定时时刻为锚，
+        区间内相邻消息间隔改为新间隔；区间之外的消息保持原定时时刻。
+        区间覆盖整批时同步更新队列基准间隔（后续新入队与压缩重排沿用新节奏）。
+        """
+        if len(parts) < 2:
+            self.api.send_message(
+                chat_id,
+                "⚠️ 用法：/pace <间隔> [起始[-结束]]\n"
+                "· /pace 30 — 整批消息间隔改为 30 分钟\n"
+                "· /pace 5 60-90 — 仅把第 60-90 条（序号见 /list）间隔改为 5 分钟\n"
+                "· /pace 5 60 — 第 60 条到队尾间隔改为 5 分钟\n"
+                "间隔支持后缀 s/m/h/d：30s、5、2h",
+            )
+            return
+        try:
+            interval_s = parse_interval(parts[1])
+        except ValueError as exc:
+            self.api.send_message(chat_id, "⚠️ 间隔无效：%s" % exc)
+            return
+        queue = self._current_queue(user_id)
+        if queue is None:
+            self.api.send_message(chat_id, "📋 你还没有任何队列。使用 /set <目标> <间隔> 开始。")
+            return
+        total = queue["pending_count"]
+        if total == 0:
+            self.api.send_message(chat_id, "⚠️ 当前队列没有待发消息，无需重排。")
+            return
+        lo, hi = 1, total
+        range_arg = parts[2].strip() if len(parts) > 2 else ""
+        if range_arg:
+            match = re.match(r"^(\d+)(?:-(\d+))?$", range_arg)
+            if not match:
+                self.api.send_message(
+                    chat_id,
+                    "⚠️ 无法解析范围「%s」。用法：X-Y（第 X 到 Y 条）、X（第 X 条到队尾）、或不填（整批）。" % range_arg,
+                )
+                return
+            lo = int(match.group(1))
+            hi = int(match.group(2)) if match.group(2) else total
+            if lo < 1 or lo > total or hi < lo:
+                self.api.send_message(
+                    chat_id,
+                    "⚠️ 范围无效（当前共 %d 条，序号 1-%d）。用 /list 查看最新序号。" % (total, total),
+                )
+                return
+            if hi > total:
+                hi = total  # 结束序号超出队尾 → 收敛到队尾
+        result = self.store.reinterval(user_id, queue["target"], lo, hi, interval_s)
+        if result is None:
+            self.api.send_message(chat_id, "⚠️ 重排失败：队列不存在或序号无效。用 /status /list 确认后重试。")
+            return
+        count, first_at, last_at = result
+        whole = lo == 1 and hi == total
+        log.info("用户 %s 重排队列 %s 第 %d-%d 条间隔为 %s 秒", user_id, queue["target"], lo, hi, interval_s)
+        if whole:
+            reply = "📐 已重排整批 %d 条消息：间隔改为 %s，队列基准间隔已同步。\n" % (count, format_interval(interval_s))
+            reply += "首条保持原时刻：%s（约 %s 后）\n" % (
+                format_time(first_at), format_interval(max(0, int(first_at - time.time()))))
+            reply += "最后一条预计：%s（约 %s 后）" % (
+                format_time(last_at), format_interval(max(0, int(last_at - time.time()))))
+            reply += "\n后续新入队消息也将按新间隔排队。"
+        else:
+            reply = "📐 已重排第 %d-%d 条（共 %d 条）：间隔改为 %s。\n" % (lo, hi, count, format_interval(interval_s))
+            reply += "该段首条预计 %s（约 %s 后）发送；段尾第 %d 条预计 %s。\n" % (
+                format_time(first_at), format_interval(max(0, int(first_at - time.time()))), hi,
+                format_time(last_at))
+            reply += "区间之外的消息保持原定时时刻不变。"
+            reply += "\n注意：此后的 /drop 或 /move 会把队列按基准间隔（%s）压缩重排，覆盖本次分段节奏。" % format_interval(
+                queue["interval_s"])
+        self.api.send_message(chat_id, reply)
+
     def _cmd_reset(self, user_id, chat_id, parts):
         """清空指定队列（默认当前队列）的待发消息并重新起锚。只影响目标队列，不干扰其它队列。"""
         target = parts[1].strip() if len(parts) > 1 else ""
@@ -1093,7 +1201,9 @@ class Bot:
             reply += "\n（含 %d 条图片/视频等媒体消息）" % media_count
         if first_send_at:
             remain = max(0, int(first_send_at - time.time()))
-            reply += "\n下一条：%s（约 %s 后）" % (format_time(first_send_at), format_interval(remain))
+            # 此处是「本批（新入队）消息」的预计发送时刻，不是队列头部下一条消息的发送
+            # 时间：排在其前的消息仍按原计划先发（总数见下一条文案）
+            reply += "\n本批消息预计发送：%s（约 %s 后）" % (format_time(first_send_at), format_interval(remain))
         reply += "\n该队列当前共 %d 条待发。" % current_snap["pending_count"]
         if full:
             reply += "\n⚠️ 队列已满，其余内容未加入。"

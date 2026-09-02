@@ -11,9 +11,11 @@
    - 群组管理员验证 / 审批流程（群内 / 显式目标 / 过期 / 不匹配）/ 审批拒绝
    - 私人目标默认禁止与开关启用；白名单拒绝；群聊消息忽略
    - 发送失败跳过与通知；409 冲突停止；队列满拒绝；未知命令
-   - /setloop 循环发送全流程（文本/媒体/超时/上限/打断）
-   - /later 原生定时（相对/绝对时间与边界）
+   - `/setloop` 循环发送全流程（文本/媒体/超时/上限/打断）
+   - `/later` 原生定时（相对/绝对时间与边界）
    - 队列管理命令（/list 多页、/drop、/move、/edit）
+   - `/pace` 已排队消息间隔重排（整批/区间/队尾开区间，参数错误不产生副作用）
+   - 命令菜单：启动 setMyCommands 注册（/ 按钮与输入联想）
    - 多媒体转发与 txt 文件按行解析
 
 运行：python test_bot.py
@@ -408,6 +410,92 @@ class StoreTests(unittest.TestCase):
         page99 = self.store.get_pending_page(222, "@pics", 99, page_size=20)
         self.assertEqual(page99["page"], 2)  # 越界夹取到末页
 
+    # ------------------------------------------------------------------ /pace 重排已排队消息间隔
+    def _slots(self):
+        user = self.store._users[str(222)]
+        return [it["send_at"] for it in user["queues"]["@pics"]["pending"]]
+
+    def test_reinterval_whole_queue_uniform(self):
+        # /pace 整批：队首保持原时刻，其余按新间隔顺延；队列基准间隔同步
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c", "d", "e"])  # 1300,1600,1900,2200,2500
+        result = self.store.reinterval(222, "@pics", 1, 5, 600)
+        self.assertEqual(result, (5, 1300.0, 3700.0))
+        self.assertEqual(self._slots(), [1300.0, 1900.0, 2500.0, 3100.0, 3700.0])
+        # 基准间隔同步 → 新入队消息锚在队尾 + 600
+        added, first_at, _, _ = self.store.add_messages(222, ["f"])
+        self.assertEqual(first_at, 4300.0)
+        snap = self.store.snapshot_user(222)
+        self.assertEqual(snap["queues"][0]["interval_s"], 600)
+
+    def test_reinterval_range_anchors_on_predecessor(self):
+        # /pace X-Y 段内（含段首与前一条的间隔）均按新间隔，段外保持原时刻
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c", "d", "e", "f"])  # 1300..2800
+        # 第 3-4 条 → 间隔 120 秒：第 3 条 = 第 2 条(1600) + 120
+        result = self.store.reinterval(222, "@pics", 3, 4, 120)
+        self.assertEqual(result, (2, 1720.0, 1840.0))
+        self.assertEqual(self._slots(), [1300.0, 1600.0, 1720.0, 1840.0, 2500.0, 2800.0])
+        # 段外时间未被触碰；基准间隔保持原值（仅整批才同步）
+        self.assertEqual(self.store.snapshot_user(222)["queues"][0]["interval_s"], 300)
+
+    def test_reinterval_range_from_head_keeps_head_slot(self):
+        # /pace 1-Y：队首原时刻不动，其后按新间隔
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c"])  # 1300,1600,1900
+        result = self.store.reinterval(222, "@pics", 1, 2, 30)
+        self.assertEqual(result, (2, 1300.0, 1330.0))
+        self.assertEqual(self._slots(), [1300.0, 1330.0, 1900.0])
+
+    def test_reinterval_tail_open_range(self):
+        # /pace X（单写）= 第 X 条到队尾
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c", "d"])  # 1300,1600,1900,2200
+        result = self.store.reinterval(222, "@pics", 3, 4, 600)
+        self.assertEqual(self._slots(), [1300.0, 1600.0, 2200.0, 2800.0])
+
+    def test_reinterval_whole_single_item(self):
+        # 单条整批：时刻不变，仅同步基准间隔
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a"])
+        result = self.store.reinterval(222, "@pics", 1, 1, 60)
+        self.assertEqual(result, (1, 1300.0, 1300.0))
+        self.assertEqual(self.store.snapshot_user(222)["queues"][0]["interval_s"], 60)
+
+    def test_reinterval_invalid_args(self):
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c"])
+        self.assertIsNone(self.store.reinterval(222, "@pics", 2, 1, 60))   # lo > hi
+        self.assertIsNone(self.store.reinterval(222, "@pics", 0, 2, 60))   # lo < 1
+        self.assertIsNone(self.store.reinterval(222, "@pics", 2, 99, 60))  # hi 越界
+        self.assertIsNone(self.store.reinterval(222, "@nope", 1, 3, 60))   # 队列不存在
+        self.assertIsNone(self.store.reinterval(222, "@pics", 1, 3, 0))    # 间隔非法
+        # 无效调用不产生副作用
+        self.assertEqual(self._slots(), [1300.0, 1600.0, 1900.0])
+
+    def test_reinterval_persists_across_reload(self):
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c", "d", "e"])
+        self.store.reinterval(222, "@pics", 2, 4, 600)
+        store2 = QueueStore(self.dir.name, now_fn=self.clock)
+        user = store2._users[str(222)]
+        self.assertEqual(
+            [it["send_at"] for it in user["queues"]["@pics"]["pending"]],
+            [1300.0, 1900.0, 2500.0, 3100.0, 2500.0],
+        )
+
+    def test_reinterval_affects_peek_ordering_and_drop_reanchor(self):
+        # 重排后调度按新时刻出队；之后的 /drop 按「当前基准间隔（已同步为 600）」压缩重排
+        self.store.set_queue(222, "@pics", 300)
+        self.store.add_messages(222, ["a", "b", "c", "d"])  # 1300,1600,1900,2200
+        self.store.reinterval(222, "@pics", 1, 4, 600)      # 整批 → 1300,1900,2500,3100
+        self.assertEqual(self.store.peek_next_due(now=2000)["send_at"], 1300.0)
+        self.store.confirm_sent(222, "@pics")  # a 发出
+        self.assertEqual(self.store.peek_next_due(now=2000)["send_at"], 1900.0)
+        # 删除第 2 条（c@2500）→ 以基准间隔 600 重排：d 从 3100 提前为 2500（若仍用旧 300 则为 2200）
+        self.store.remove_at(222, "@pics", 2)
+        self.assertEqual(self._slots(), [1900.0, 2500.0])
+
 
 class IntervalTests(unittest.TestCase):
     def test_minutes_default(self):
@@ -567,6 +655,7 @@ class FakeTelegramServer:
         self.conflict = conflict
         self.sent = []  # 发往目标的记录
         self.replies = []  # 发给用户的回复记录
+        self.commands = None  # setMyCommands 最近一次注册参数（命令菜单测试用）
         self.lock = threading.Lock()
         self.server = HTTPServer(("127.0.0.1", 0), self._make_handler())
         self.port = self.server.server_address[1]
@@ -647,6 +736,10 @@ class FakeTelegramServer:
             if file_id in self.files:
                 return {"file_id": file_id, "file_size": len(self.files[file_id]), "file_path": "docs/" + file_id}
             return ("__error__", 400, "Bad Request: wrong file identifier")
+        if method == "setMyCommands":
+            with self.lock:
+                self.commands = {"commands": params.get("commands"), "scope": params.get("scope")}
+            return True
         if method == "sendMessage":
             failure = self.failing_sends.get(str(params.get("chat_id")))
             if failure:
@@ -1326,6 +1419,94 @@ class EndToEndTests(unittest.TestCase):
         total = sum(q["pending_count"] for q in snap["queues"])
         self.assertLessEqual(total, 5000)
         self.assertTrue(any(q["loop_info"] for q in snap["queues"]))
+
+
+    def test_command_menu_registered_on_startup(self):
+        # 启动时 setMyCommands 注册命令菜单（/ 按钮与输入联想）
+        harness = self._run([])
+        deadline = time.time() + 10
+        commands = None
+        while time.time() < deadline:
+            with harness.fake.lock:
+                registered = harness.fake.commands
+            if registered:
+                commands = registered.get("commands")
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(commands, "启动时应调用 setMyCommands 注册命令菜单")
+        names = [c["command"] for c in commands]
+        self.assertGreaterEqual(len(names), 10)
+        for want in ("start", "set", "setloop", "pace", "later", "list", "drop",
+                     "move", "edit", "reset", "cancel", "status", "approve", "help"):
+            self.assertIn(want, names)
+        for cmd in commands:
+            self.assertRegex(cmd["command"], r"^[a-z0-9_]{1,32}$")
+            self.assertTrue(cmd.get("description"), "每个命令都应有描述：%s" % cmd.get("command"))
+
+    def test_pace_command_reschedules_queued_partial(self):
+        # /pace 2s 2-3：段首以第 1 条原时刻为锚，段内相邻间隔改为 2 秒；段外与基准间隔不受影响
+        updates = [
+            [make_update(1, 777, "private", 222, "/set @pics 1h")],
+            [make_update(2, 777, "private", 222, "a")],
+            [make_update(3, 777, "private", 222, "b")],
+            [make_update(4, 777, "private", 222, "c")],
+            [make_update(5, 777, "private", 222, "/pace 2s 2-3")],
+        ]
+        harness = self._run(updates)
+        # 入队回复展示的是「本批（新入队）消息」的预计发送时刻，不再是容易误读的 下一条：
+        self.assertTrue(harness.wait_for(lambda s, r: any("本批消息预计发送" in t for t in r)))
+        joined = "\n".join(harness.reply_texts())
+        self.assertNotIn("下一条：", joined)
+
+        self.assertTrue(harness.wait_for(lambda s, r: any("已重排第 2-3 条" in t for t in r)))
+        self.assertTrue(any("第 2-3 条（共 2 条）" in t for t in harness.reply_texts()))
+        self.assertTrue(any("区间之外的消息保持原定时时刻不变" in t for t in harness.reply_texts()))
+        pending = harness.bot.store._users[str(222)]["queues"]["@pics"]["pending"]
+        slots = [it["send_at"] for it in pending]
+        self.assertEqual(len(slots), 3)
+        self.assertAlmostEqual(slots[1] - slots[0], 2.0, delta=0.01)
+        self.assertAlmostEqual(slots[2] - slots[1], 2.0, delta=0.01)
+        # 分段重排不动队列基准间隔（供后续新入队使用）
+        self.assertEqual(harness.bot.store.snapshot_user(222)["queues"][0]["interval_s"], 3600.0)
+
+    def test_pace_command_reschedules_queued_whole(self):
+        # /pace 30 整批：队首原时刻不变，其余按新间隔（1800s）顺延，基准间隔同步
+        updates = [
+            [make_update(1, 777, "private", 222, "/set @pics 1h")],
+            [make_update(2, 777, "private", 222, "a")],
+            [make_update(3, 777, "private", 222, "b")],
+            [make_update(4, 777, "private", 222, "c")],
+            [make_update(5, 777, "private", 222, "/pace 30")],
+        ]
+        harness = self._run(updates)
+        self.assertTrue(harness.wait_for(lambda s, r: any("已重排整批 3 条" in t for t in r)))
+        pending = harness.bot.store._users[str(222)]["queues"]["@pics"]["pending"]
+        slots = [it["send_at"] for it in pending]
+        self.assertEqual(len(slots), 3)
+        self.assertAlmostEqual(slots[1] - slots[0], 1800.0, delta=0.01)
+        self.assertAlmostEqual(slots[2] - slots[1], 1800.0, delta=0.01)
+        self.assertEqual(harness.bot.store.snapshot_user(222)["queues"][0]["interval_s"], 1800.0)
+        joined = "\n".join(harness.reply_texts())
+        self.assertIn("后续新入队消息也将按新间隔排队", joined)
+
+    def test_pace_usage_and_errors(self):
+        # /pace 参数缺失 / 范围非法 / 间隔非法 → 提示且不动队列
+        updates = [
+            [make_update(1, 777, "private", 222, "/pace")],
+            [make_update(2, 777, "private", 222, "/set @pics 1h")],
+            [make_update(3, 777, "private", 222, "a")],
+            [make_update(4, 777, "private", 222, "b")],
+            [make_update(5, 777, "private", 222, "/pace 5 0-2")],
+            [make_update(6, 777, "private", 222, "/pace abc")],
+        ]
+        harness = self._run(updates)
+        self.assertTrue(harness.wait_for(lambda s, r: any("用法：/pace" in t for t in r)))
+        self.assertTrue(harness.wait_for(lambda s, r: any("范围无效" in t for t in r)))
+        self.assertTrue(harness.wait_for(lambda s, r: any("间隔无效" in t for t in r)))
+        pending = harness.bot.store._users[str(222)]["queues"]["@pics"]["pending"]
+        slots = [it["send_at"] for it in pending]
+        self.assertEqual(len(slots), 2)
+        self.assertAlmostEqual(slots[1] - slots[0], 3600.0, delta=0.01)  # 未被改动
 
 
 if __name__ == "__main__":

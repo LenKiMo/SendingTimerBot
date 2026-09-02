@@ -108,6 +108,18 @@ class TelegramClient:
         """启动自检：返回 bot 自身信息（dict）。"""
         return self.call("getMe")
 
+    def set_my_commands(self, commands, scope=None):
+        """注册命令菜单（对话框 / 按钮与输入 / 时的命令联想）。
+
+        commands：[{"command": "set", "description": "..."}]，
+        command 限小写字母/数字/下划线且 ≤32 字符，description ≤256 字符。
+        scope：可选 BotCommandScope（默认全局；私聊用户与群组管理员可见菜单）。
+        """
+        params = {"commands": commands}
+        if scope:
+            params["scope"] = scope
+        return self.call("setMyCommands", params)
+
     def get_updates(self, offset=None, timeout=30):
         """长轮询获取更新。offset 用于断点续传（已持久化，重启不重复消费）。"""
         params = {"timeout": timeout, "allowed_updates": ["message"]}

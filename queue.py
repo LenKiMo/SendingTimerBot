@@ -548,7 +548,7 @@ class QueueStore:
                     user["current"] = None
             self._save_user(user_id, user)
 
-    # ================================================================== 队列管理（/list /drop /move /edit）
+    # ================================================================== 队列管理（/list /drop /move /edit /pace）
     def get_pending_page(self, user_id, target, page, page_size=20):
         """返回当前队列待发列表页。返回 {"items", "total", "page", "pages"} 或 None（队列不存在）。"""
         with self._lock:
@@ -586,6 +586,50 @@ class QueueStore:
         head = record["pending"][0]["send_at"]
         for i, item in enumerate(record["pending"][1:], start=1):
             item["send_at"] = head + i * record["interval_s"]
+
+    def reinterval(self, user_id, target, lo, hi, interval_s):
+        """重排第 lo..hi 条（1-based，闭区间）已排定消息的发送间隔为 interval_s（/pace）。
+
+        语义（对「已排队消息」的时间链做局部改写，不动消息内容与顺序）：
+        - 区间首条为队首（lo == 1）：保持其原定时时刻不变，段内其余消息按新间隔顺延
+          （队首的锚是上一次实际发送/收到时刻，无法回溯，保持原时刻最可预期）；
+        - 否则：以第 lo-1 条的原定时时刻为锚，区间首条 = 前一条 + interval_s，
+          段内相邻消息的间隔均为 interval_s；
+        - 区间之外（lo 之前与 hi 之后）的消息保持原定时时刻不变（相邻段节奏不受影响）；
+        - 区间覆盖整个队列（lo == 1 且 hi == 队尾）时，同步更新队列基准间隔 interval_s，
+          使后续新入队与 /drop /move 的压缩重排沿用新节奏（与 /set 改间隔一致）。
+
+        返回 (重排条数, 段首新时刻, 段尾新时刻)；队列不存在或序号无效返回 None。
+        """
+        with self._lock:
+            user = self._users.get(str(user_id))
+            record = user["queues"].get(target) if user else None
+            pending = record["pending"] if record else []
+            n = len(pending)
+            if (
+                not record
+                or interval_s is None
+                or interval_s <= 0
+                or lo is None
+                or hi is None
+                or not (1 <= lo <= hi <= n)
+            ):
+                return None
+            if lo == 1:
+                t = pending[0]["send_at"]  # 队首原定时时刻保持
+                start = 2
+            else:
+                t = pending[lo - 2]["send_at"]  # 锚：区间前一条的原定时时刻
+                start = lo
+            for index in range(start - 1, hi):
+                t += float(interval_s)
+                pending[index]["send_at"] = t
+            whole = lo == 1 and hi == n
+            if whole:
+                record["interval_s"] = float(interval_s)  # 整批改节奏 → 基准间隔同步
+            record["idle_since"] = None
+            self._save_user(user_id, user)
+            return hi - lo + 1, pending[lo - 1]["send_at"], pending[hi - 1]["send_at"]
 
     def remove_at(self, user_id, target, index):
         """删除第 index 条（1-based）。返回 (预览, 剩余条数) 或 None（越界/队列不存在）。"""
