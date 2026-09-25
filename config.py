@@ -145,3 +145,7 @@ class Config:
 
         # /setloop 内容收集：无新内容超过该秒数自动开始循环（默认 2 分钟）
         self.loop_collect_timeout = _float(env, "LOOP_COLLECT_TIMEOUT", 120)
+
+        # 相册（媒体组）合并等待：同一条相册的分片通常在同一批更新里到达，
+        # 这里再等一小会儿并补拉一次，兜住「分片跨批」的少数情况（默认 1.2 秒）
+        self.album_grace_s = _float(env, "ALBUM_GRACE_S", 1.2)

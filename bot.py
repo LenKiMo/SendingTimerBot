@@ -22,7 +22,7 @@ import threading
 import time
 
 from config import Config
-from queue import LEGACY_USER, QueueStore
+from queue import ALBUM_SINGLE_ONLY, LEGACY_USER, QueueStore
 from telegram_api import ApiError, TelegramClient
 
 log = logging.getLogger("bot")
@@ -299,7 +299,17 @@ class Bot:
                 log.error("getUpdates 网络错误：%s", exc)
                 time.sleep(3)
                 continue
-            for update in updates:
+            # 相册分片补拉：整批里出现媒体组时多等一小会儿再取一次，兜住「分片跨批」的少数情况
+            if any(((u.get("message") or {}).get("media_group_id")) for u in updates):
+                time.sleep(self.cfg.album_grace_s)
+                try:
+                    tail = max((u.get("update_id") or 0) for u in updates) + 1
+                    extra = self.api.get_updates(offset=tail, timeout=0)
+                    if extra:
+                        updates = updates + extra
+                except Exception as exc:
+                    log.debug("相册分片补拉失败（忽略）：%s", exc)
+            for update in self._merge_album_updates(updates):
                 update_id = update.get("update_id")
                 if update_id is None:
                     continue
@@ -310,6 +320,61 @@ class Bot:
                     log.exception("处理 update %s 时出错", update_id)
                 # 处理成功后才推进 offset（至少一次投递；极端崩溃时可能重复，但不丢失）
                 self.store.set_offset(offset)
+
+    def _merge_album_updates(self, updates):
+        """把同一批里属于同一媒体组（相册）的多条消息合并成一条合成 update。
+
+        Telegram 把相册拆成多条 update 推送（共享 media_group_id）。逐条处理会被当成
+        多条独立消息分别入队 → 相册被拆成间隔一个周期的多条单图（真实事故：2 图的推文
+        在频道里变成相隔 15 分钟的两条单图）。这里按 (chat, media_group_id) 合并：
+        合成消息带 album=[{kind, file_id}...] 与说明文字；update_id 取组内最大值，
+        让外层 offset 一次推进过整组，避免余下分片被重复投递。
+        """
+        out, index = [], {}
+        for update in updates:
+            msg = update.get("message") or {}
+            group_id = msg.get("media_group_id")
+            if not group_id:
+                out.append(update)
+                continue
+            key = ((msg.get("chat") or {}).get("id"), group_id)
+            ref = self._media_ref(msg)
+            if key in index:
+                synth = out[index[key]]["message"]
+                if ref and all(r["file_id"] != ref["file_id"] for r in synth["album"]):
+                    synth["album"].append(ref)
+                cap = (msg.get("caption") or "").strip()
+                if cap and not (synth.get("caption") or "").strip():
+                    synth["caption"] = cap
+                tail = update.get("update_id")
+                if tail is not None and tail > (out[index[key]].get("update_id") or 0):
+                    out[index[key]]["update_id"] = tail
+            else:
+                synth = dict(msg)
+                synth["album"] = [ref] if ref else []
+                synth["caption"] = (msg.get("caption") or "").strip()
+                out.append({"update_id": update.get("update_id"), "message": synth})
+                index[key] = len(out) - 1
+        return out
+
+    @staticmethod
+    def _media_ref(msg):
+        """从单条消息里取媒体引用 {"kind", "file_id"}（相册分片合并用）；非媒体返回 None。"""
+        if msg.get("photo"):
+            return {"kind": "photo", "file_id": msg["photo"][-1]["file_id"]}
+        if msg.get("video"):
+            return {"kind": "video", "file_id": msg["video"]["file_id"]}
+        if msg.get("animation"):
+            return {"kind": "animation", "file_id": msg["animation"]["file_id"]}
+        if msg.get("audio"):
+            return {"kind": "audio", "file_id": msg["audio"]["file_id"]}
+        if msg.get("voice"):
+            return {"kind": "voice", "file_id": msg["voice"]["file_id"]}
+        if msg.get("sticker"):
+            return {"kind": "sticker", "file_id": msg["sticker"]["file_id"]}
+        if msg.get("document"):
+            return {"kind": "document", "file_id": msg["document"]["file_id"]}
+        return None
 
     # ------------------------------------------------------------------ 调度线程
     def _scheduler_loop(self):
@@ -342,19 +407,62 @@ class Bot:
         payload, send_at = item["payload"], item["send_at"]
         kind, caption = item["kind"], item.get("caption")
         target, user_id = item["target"], item["user_id"]
+        desc = self._item_desc(kind, payload)
         try:
             if kind == "text":
                 self.api.send_message(target, payload)
+            elif kind == "album":
+                self._send_album(target, payload, caption)
             else:
                 self._send_media(kind, target, payload, caption)
             self.store.confirm_sent(user_id, target)
-            log.info("已发送到 %s（计划 %s，%s）：%s", target, format_time(send_at), kind, payload[:40])
+            log.info("已发送到 %s（计划 %s，%s）：%s", target, format_time(send_at), kind, desc)
         except ApiError as exc:
             log.error("发送到 %s 失败（%s）：%s", target, exc.code, exc.description)
             self.store.discard_next(user_id, target)  # 永久错误（无权限/频道不存在等），跳过该条
-            self._notify_owner(user_id, "❌ 发送失败，已跳过该条消息：%s\n原文：%s" % (exc.description, payload[:100]))
+            self._notify_owner(user_id, "❌ 发送失败，已跳过该条消息：%s\n原文：%s" % (exc.description, desc))
         except Exception as exc:
             log.warning("发送异常（稍后重试）：%s", exc)
+
+    @staticmethod
+    def _item_desc(kind, payload):
+        """日志/通知里的条目简述（相册负载是列表，不能直接切字符）。"""
+        if kind == "album":
+            return "相册×%d" % len(payload or [])
+        return str(payload)[:100]
+
+    # 相册各项 → Bot API 媒体组类型（贴纸/语音无法进媒体组，见 _send_album）
+    ALBUM_MEDIA_TYPE = {"photo": "photo", "video": "video", "audio": "audio",
+                        "animation": "video", "document": "document",
+                        "voice": "document", "sticker": "document"}
+
+    def _send_album(self, target, refs, caption=None):
+        """发送相册：能进媒体组的用 sendMediaGroup（每批 ≤10），说明只挂第一条。
+
+        贴纸/语音这类无法加入媒体组的类型逐条单发；某一批只剩 1 项时也单发
+        （Telegram 要求媒体组至少 2 项）。
+        """
+        caption = (caption or "")[:1024]
+        groupable = [r for r in refs if r.get("kind") not in ALBUM_SINGLE_ONLY]
+        singles = [r for r in refs if r.get("kind") in ALBUM_SINGLE_ONLY]
+        if singles and len(groupable) < 2:      # 凑不满一个媒体组 → 全部逐条单发
+            singles = groupable + singles
+            groupable = []
+        pending_caption = caption
+        size = self.api.MAX_MEDIA_GROUP
+        for i in range(0, len(groupable), size):
+            chunk = groupable[i:i + size]
+            if len(chunk) == 1:
+                m = chunk[0]
+                self._send_media(m["kind"], target, m["file_id"], pending_caption)
+            else:
+                media = [{"type": self.ALBUM_MEDIA_TYPE.get(m.get("kind"), "document"),
+                          "media": m["file_id"]} for m in chunk]
+                self.api.send_media_group(target, media, pending_caption)
+            pending_caption = None
+        for m in singles:
+            self._send_media(m["kind"], target, m["file_id"], pending_caption)
+            pending_caption = None
 
     def _send_media(self, kind, target, file_id, caption=None):
         """按类型分发媒体发送（caption 截断到 1024 字符，Telegram 平台限制）。"""
@@ -436,6 +544,14 @@ class Bot:
     def _collect_media_item(self, msg):
         """从消息中提取媒体条目（kind/payload/caption）；纯文本返回 None。"""
         caption = msg.get("caption") or ""
+        refs = msg.get("album")
+        if refs:
+            if len(refs) >= 2:
+                return {"kind": "album", "payload": refs, "caption": caption}
+            # 合并后只剩一张（或本来就只有一张分片）→ 退化为单媒体条目
+            one = refs[0]
+            return {"kind": one["kind"], "payload": one["file_id"],
+                    "caption": "" if one["kind"] == "sticker" else caption}
         if msg.get("photo"):
             return {"kind": "photo", "payload": msg["photo"][-1]["file_id"], "caption": caption}
         if msg.get("video"):
@@ -1196,9 +1312,11 @@ class Bot:
             return
         name = current_snap["display"] or current_snap["target"]
         media_count = sum(1 for it in items if it["kind"] != "text")
+        album_note = "".join("、相册×%d" % len(it.get("payload") or [])
+                            for it in items if it["kind"] == "album")
         reply = "📥 已排队 %d 条 → %s（间隔 %s）。" % (added, name, format_interval(current_snap["interval_s"]))
         if media_count:
-            reply += "\n（含 %d 条图片/视频等媒体消息）" % media_count
+            reply += "\n（含 %d 条图片/视频等媒体消息%s）" % (media_count, album_note)
         if first_send_at:
             remain = max(0, int(first_send_at - time.time()))
             # 此处是「本批（新入队）消息」的预计发送时刻，不是队列头部下一条消息的发送

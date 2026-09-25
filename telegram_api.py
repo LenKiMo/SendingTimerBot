@@ -160,6 +160,20 @@ class TelegramClient:
     def send_document(self, chat_id, document, caption=None):
         return self.call("sendDocument", {"chat_id": chat_id, "document": document, "caption": caption or ""})
 
+    MAX_MEDIA_GROUP = 10  # Telegram 相册（媒体组）单次上限
+
+    def send_media_group(self, chat_id, media, caption=None):
+        """发送相册（媒体组，2-10 项）。
+
+        media：[{"type": "photo"|"video"|"audio"|"document", "media": file_id}, ...]
+        caption 只挂在第一项上 —— Telegram 平台语义：一个相册只有一条说明；
+        发送方负责保证同一相册内不混入「只能单发」的类型（贴纸/语音等）。
+        """
+        items = [dict(m) for m in media]
+        if caption and items:
+            items[0]["caption"] = caption[:1024]
+        return self.call("sendMediaGroup", {"chat_id": chat_id, "media": json.dumps(items, ensure_ascii=False)})
+
     def get_file(self, file_id):
         """获取文件信息（含 file_path，用于下载）。"""
         return self.call("getFile", {"file_id": file_id})

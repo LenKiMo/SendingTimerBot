@@ -17,6 +17,7 @@
    - `/pace` 已排队消息间隔重排（整批/区间/队尾开区间，参数错误不产生副作用）
    - 命令菜单：启动 setMyCommands 注册（/ 按钮与输入联想）
    - 多媒体转发与 txt 文件按行解析
+   - 相册（媒体组）：同批合并为一个相册、分片跨批补拉合并、单张退化单发、超 10 张分批
 
 运行：python test_bot.py
 """
@@ -343,6 +344,57 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(item["payload"], "FILE_A")
         s2.confirm_sent(222, "@pics")
         self.assertEqual(s2.peek_next_due(now=2000)["kind"], "animation")
+
+    def test_album_item_scheduled_and_persisted(self):
+        # 相册条目：payload 是多张媒体的列表（不能被字符串化），入队/出队/持久化
+        self.store.set_queue(222, "@pics", 300)
+        refs = [{"kind": "photo", "file_id": "A"}, {"kind": "photo", "file_id": "B"}]
+        added, first_at, full, _ = self.store.add_items(222, [
+            {"kind": "album", "payload": refs, "caption": "两图"},
+            {"kind": "text", "payload": "链接1"},
+        ])
+        self.assertEqual(added, 2)
+        self.assertEqual(first_at, 1300.0)
+        item = self.store.peek_next_due(now=2000)
+        self.assertEqual(item["kind"], "album")
+        self.assertEqual(item["payload"], refs)
+        self.assertEqual(item["caption"], "两图")
+        # 持久化：重启后仍是列表，顺序不变（相册在前）
+        s2 = QueueStore(self.dir.name, now_fn=self.clock)
+        item = s2.peek_next_due(now=2000)
+        self.assertEqual(item["kind"], "album")
+        self.assertEqual(item["payload"], refs)
+        page = s2.get_pending_page(222, "@pics", 1)
+        self.assertEqual(page["items"][0]["preview"], "[相册×2（图片）] 两图")
+        s2.confirm_sent(222, "@pics")
+        self.assertEqual(s2.peek_next_due(now=2000)["payload"], "链接1")
+
+    def test_album_item_rejects_invalid_payload(self):
+        # 不足 2 项 / 结构非法的相册负载不入队，避免产生非法的「1 项媒体组」
+        self.store.set_queue(222, "@pics", 300)
+        added, _, _, _ = self.store.add_items(222, [
+            {"kind": "album", "payload": [{"kind": "photo", "file_id": "A"}]},
+            {"kind": "album", "payload": "A,B"},
+            {"kind": "album", "payload": [{"kind": "photo"}, {"file_id": "B"}]},
+            {"kind": "text", "payload": "ok"},
+        ])
+        self.assertEqual(added, 1)
+        self.assertEqual(self.store.peek_next_due(now=2000)["payload"], "ok")
+
+    def test_album_in_loop_items(self):
+        # /setloop 循环序列同样支持相册条目
+        self.store.set_queue(222, "@pics", 300)
+        refs = [{"kind": "photo", "file_id": "A"}, {"kind": "video", "file_id": "B"}]
+        added, _, full = self.store.replace_items(222, [
+            {"kind": "album", "payload": refs},
+            {"kind": "text", "payload": "L1"},
+        ], 60)
+        self.assertEqual((added, full), (2, False))
+        first = self.store.peek_next_due(now=2000)
+        self.assertEqual(first["kind"], "album")
+        self.assertEqual(first["payload"], refs)
+        self.assertEqual(self.store.get_pending_page(222, "@pics", 1)["items"][0]["preview"],
+                         "[相册×2（图片/视频）]")
 
     def test_remove_at_reanchors(self):
         # /drop：删除后按间隔压缩定时链
@@ -751,6 +803,20 @@ class FakeTelegramServer:
                 "schedule_date": params.get("schedule_date"),
             }
             return self._record_send(record)
+        if method == "sendMediaGroup":
+            try:
+                media = json.loads(params.get("media") or "[]")
+            except Exception:
+                media = []
+            record = {
+                "chat_id": params.get("chat_id"),
+                "method": method,
+                "media": media,
+                "file_id": ",".join(str(m.get("media")) for m in media),
+                "caption": (media[0].get("caption") if media else "") or "",
+                "at": time.time(),
+            }
+            return self._record_send(record)
         if method in ("sendPhoto", "sendVideo", "sendAnimation", "sendAudio", "sendVoice", "sendSticker", "sendDocument"):
             payload_key = {"sendPhoto": "photo", "sendVideo": "video", "sendAnimation": "animation",
                            "sendAudio": "audio", "sendVoice": "voice", "sendSticker": "sticker",
@@ -779,7 +845,8 @@ class FakeTelegramServer:
 
 
 def make_update(update_id, chat_id, chat_type, user_id, text=None, photo=None, animation=None,
-                video=None, document=None, caption=None, mime_type="application/octet-stream", file_name="data.bin"):
+                video=None, document=None, caption=None, mime_type="application/octet-stream",
+                file_name="data.bin", media_group_id=None):
     msg = {
         "message_id": update_id,
         "from": {"id": user_id, "first_name": "Tester"},
@@ -798,17 +865,22 @@ def make_update(update_id, chat_id, chat_type, user_id, text=None, photo=None, a
         msg["video"] = {"file_id": video}
     if document:
         msg["document"] = {"file_id": document, "file_name": file_name, "mime_type": mime_type}
+    if media_group_id:
+        msg["media_group_id"] = media_group_id
     return {"update_id": update_id, "message": msg}
 
 
 _ENV_KEYS = ("BOT_TOKEN", "API_BASE_URL", "CHECK_INTERVAL_S", "DATA_DIR", "ALLOWED_USER_IDS", "NO_PROXY",
-             "ALLOW_PRIVATE_TARGETS", "LOOP_COLLECT_TIMEOUT", "MAX_QUEUE", "PENDING_APPROVAL_SECONDS")
+             "ALLOW_PRIVATE_TARGETS", "LOOP_COLLECT_TIMEOUT", "MAX_QUEUE", "PENDING_APPROVAL_SECONDS",
+             "ALBUM_GRACE_S")
 
 
 def _record_text(r):
     """把伪服务器的发送记录转为文本表示（文本消息原文 / 媒体记录标签）。"""
     if "text" in r:
         return r["text"]
+    if r.get("method") == "sendMediaGroup":
+        return "[sendMediaGroup:%d]" % len(r.get("media") or [])
     return "[%s:%s]" % (r.get("method", "media"), r.get("file_id", ""))
 
 
@@ -1367,6 +1439,65 @@ class EndToEndTests(unittest.TestCase):
         joined = "\n".join(harness.reply_texts())
         self.assertIn("含 1 条媒体", joined)  # 循环描述注明媒体数量
         self.assertIn("已收集 2 项", joined)
+
+    # ---------------------------------------------------------------- 相册（媒体组）
+    def test_album_media_group_sent_as_one_album(self):
+        # 同 media_group_id 的多条 update = 一条相册：必须合成 1 条队列项 → 1 次 sendMediaGroup
+        updates = [
+            [make_update(1, 777, "private", 222, "/set @pics 1s")],
+            [make_update(2, 777, "private", 222, photo="ALB_1", caption="两图推文", media_group_id="G1"),
+             make_update(3, 777, "private", 222, photo="ALB_2", media_group_id="G1")],
+        ]
+        harness = self._run(updates, extra_env={"ALBUM_GRACE_S": "0.2"})
+        self.assertTrue(harness.wait_for(lambda s, r: any("sendMediaGroup" in x for x in s)))
+        groups = [x for x in harness.sent if x.get("method") == "sendMediaGroup"]
+        self.assertEqual(len(groups), 1, "两条分片必须合并成一个相册，不能拆成两次发送")
+        self.assertEqual([m["media"] for m in groups[0]["media"]], ["ALB_1", "ALB_2"])
+        self.assertEqual([m["type"] for m in groups[0]["media"]], ["photo", "photo"])
+        self.assertEqual(groups[0]["media"][0].get("caption"), "两图推文")
+        self.assertIsNone(groups[0]["media"][1].get("caption"), "说明只挂第一条")
+        self.assertFalse([x for x in harness.sent if x.get("method") == "sendPhoto"], "不应再逐张单发")
+        replies = harness.reply_texts()
+        self.assertTrue(any("已排队 1 条" in t for t in replies))
+        self.assertTrue(any("相册×2" in t for t in replies))
+
+    def test_album_shards_split_across_batches(self):
+        # 分片跨批（Telegram 偶发）：等一小会儿补拉一次后仍应合并成一个相册
+        updates = [
+            [make_update(1, 777, "private", 222, "/set @pics 1s")],
+            [make_update(2, 777, "private", 222, photo="SPLIT_1", caption="分片", media_group_id="G2")],
+            [make_update(3, 777, "private", 222, photo="SPLIT_2", media_group_id="G2")],
+        ]
+        harness = self._run(updates, extra_env={"ALBUM_GRACE_S": "0.3"})
+        self.assertTrue(harness.wait_for(lambda s, r: any("sendMediaGroup" in x for x in s)))
+        groups = [x for x in harness.sent if x.get("method") == "sendMediaGroup"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual([m["media"] for m in groups[0]["media"]], ["SPLIT_1", "SPLIT_2"])
+        self.assertEqual(groups[0]["media"][0].get("caption"), "分片")
+
+    def test_single_shard_group_degrades_to_single_send(self):
+        # 只有一张分片 → 退化为单发（不产生非法的 1 项媒体组）
+        updates = [
+            [make_update(1, 777, "private", 222, "/set @pics 1s")],
+            [make_update(2, 777, "private", 222, photo="ONE_1", caption="单张", media_group_id="G3")],
+        ]
+        harness = self._run(updates, extra_env={"ALBUM_GRACE_S": "0.2"})
+        self.assertTrue(harness.wait_for(lambda s, r: any("sendPhoto" in x for x in s)))
+        self.assertFalse([x for x in harness.sent if x.get("method") == "sendMediaGroup"])
+        self.assertEqual([x for x in harness.sent if x.get("method") == "sendPhoto"][0]["caption"], "单张")
+
+    def test_album_over_ten_items_splits_into_multiple_groups(self):
+        # 单项超过 10 张时拆成多个媒体组（Telegram 单组上限 10）
+        batch = [make_update(2 + i, 777, "private", 222, photo="BIG_%d" % i, media_group_id="G4")
+                 for i in range(12)]
+        updates = [[make_update(1, 777, "private", 222, "/set @pics 1s")], batch]
+        harness = self._run(updates, extra_env={"ALBUM_GRACE_S": "0.2"})
+        self.assertTrue(harness.wait_for(
+            lambda s, r: sum(1 for x in s if "sendMediaGroup" in x) == 2, timeout=25))
+        groups = [x for x in harness.sent if x.get("method") == "sendMediaGroup"]
+        self.assertEqual([len(g["media"]) for g in groups], [10, 2])
+        self.assertFalse([x for x in harness.sent if x.get("method") == "sendPhoto"])
+        self.assertTrue(any("相册×12" in t for t in harness.reply_texts()))
 
     def test_loop_timeout_auto_start(self):
         # 收集超时自动开始（LOOP_COLLECT_TIMEOUT=0.5s）

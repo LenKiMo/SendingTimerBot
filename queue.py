@@ -35,7 +35,25 @@ MEDIA_LABELS = {
     "voice": "语音",
     "sticker": "贴纸",
     "document": "文件",
+    "album": "相册",
 }
+
+# 相册（媒体组）里允许出现的媒体类型 → 能作为 sendMediaGroup 之外的「单发」类型
+# （贴纸/语音无法加入媒体组，遇到时该条相册会降级为逐条单发，见 bot._send_album）
+ALBUM_SINGLE_ONLY = ("sticker", "voice")
+
+
+def clean_album_refs(payload):
+    """规范化相册负载 → [{"kind": ..., "file_id": ...}]；不足 2 项或格式非法返回 None。"""
+    refs = []
+    if isinstance(payload, list):
+        for ref in payload:
+            if not isinstance(ref, dict):
+                continue
+            file_id = ref.get("file_id")
+            if isinstance(file_id, str) and file_id:
+                refs.append({"kind": ref.get("kind") or "document", "file_id": file_id})
+    return refs if len(refs) >= 2 else None
 
 
 class QueueStore:
@@ -113,6 +131,16 @@ class QueueStore:
             payload = item.get("payload")
             if payload is None:
                 payload = item.get("text") if kind == "text" else item.get("file_id")
+            if kind == "album":
+                refs = clean_album_refs(payload)
+                if refs:
+                    record["pending"].append({
+                        "send_at": float(item["send_at"]),
+                        "kind": "album",
+                        "payload": refs,
+                        "caption": item.get("caption"),
+                    })
+                continue
             if payload:
                 record["pending"].append({
                     "send_at": float(item["send_at"]),
@@ -338,7 +366,10 @@ class QueueStore:
             anchor = self._next_anchor_locked(record)
             for item in items:
                 kind = item.get("kind", "text")
-                payload = (item.get("payload") or "").strip() if kind == "text" else (item.get("payload") or "")
+                if kind == "album":
+                    payload = clean_album_refs(item.get("payload"))
+                else:
+                    payload = (item.get("payload") or "").strip() if kind == "text" else (item.get("payload") or "")
                 if not payload:
                     continue
                 if len(record["pending"]) >= self._max_pending:
@@ -392,7 +423,10 @@ class QueueStore:
             anchor = self._next_anchor_locked(record)
             for item in items:
                 kind = item.get("kind", "text")
-                payload = (item.get("payload") or "").strip() if kind == "text" else (item.get("payload") or "")
+                if kind == "album":
+                    payload = clean_album_refs(item.get("payload"))
+                else:
+                    payload = (item.get("payload") or "").strip() if kind == "text" else (item.get("payload") or "")
                 if not payload:
                     continue
                 if len(record["pending"]) >= self._max_pending:
@@ -572,6 +606,10 @@ class QueueStore:
             text = item["payload"]
             return text if len(text) <= 60 else text[:60] + "…"
         label = MEDIA_LABELS.get(item["kind"], item["kind"])
+        if item["kind"] == "album":
+            refs = item.get("payload") or []
+            kinds = [MEDIA_LABELS.get(r.get("kind"), r.get("kind")) for r in refs]
+            label = "相册×%d（%s）" % (len(refs), "/".join(sorted(set(kinds)))) if refs else "相册"
         caption = (item.get("caption") or "").strip()
         if caption:
             caption = caption if len(caption) <= 40 else caption[:40] + "…"
